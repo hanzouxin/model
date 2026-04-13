@@ -363,21 +363,21 @@ class DCMHT(nn.Module):
         self.logger = logger if logger is not None else get_logger(os.path.join(saveDir, "train.log" if is_train else "test.log"))
         self.writer = writer if writer is not None and is_train else get_summary_writer(os.path.join(saveDir, "tensorboard"))
         embedDim, self.clip = self.load_clip(clipPath)
-        self.device = torch.device("cuda:5" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.clip = self.clip.to(self.device)
         self.clip_tokenizer = Tokenizer()
-        self.dataset_name = "nuswide"
-        self.class_names, self.label_map = get_class_info("nuswide")
+        self.dataset_name = "flickr25k"
+        self.class_names, self.label_map = get_class_info("flickr25k")
         
         self.use_oracle_prompt = False     # 先开着做诊断实验
         self.use_filtered_prompt = True
         self.oracle_topk = None              # 先和你当前 topk 保持一致
-        self.cross_attention = CrossAttention(512,8).to(self.device)
+        # self.cross_attention = CrossAttention(512,8).to(self.device)
         self.prompt_fusion = GatedFusion(embedDim, dropout=0.1)
         self.text_prompt_fusion = TextPromptGraphFusion(dim=embedDim, num_layers=2,dropout=0.1)
         self.prompt_generator = PromptGenerator(
-            dataset_name="nuswide",
-            classifier_ckpt="./checkpoints/prompt_cls_nuswide.pt",
+            dataset_name="flickr25k",
+            classifier_ckpt="./checkpoints/prompt_cls_flickr25k.pt",
             bert_path="/home/yuck/bert-base-uncased",
             device=self.device,
             maxWords=32,
@@ -391,24 +391,80 @@ class DCMHT(nn.Module):
         self.image_hash = LinearHash(inputDim=embedDim, outputDim=outputDim)
         self.text_hash = LinearHash(inputDim=embedDim, outputDim=outputDim)
 
-    def freezen(self):
+        self.freeze_clip_backbone(train_visual_last_n=3, train_text_last_n=2)
+        self.print_trainable_params()
+
+        self.image_implicit_prompt = nn.Parameter(torch.randn(1, embedDim) * 0.02)
+        self.text_implicit_prompt = nn.Parameter(torch.randn(1, embedDim) * 0.02)
+
+
+    def freeze_clip_backbone(self, train_visual_last_n=3, train_text_last_n=2):
+        """
+        Freeze most of CLIP and only unfreeze:
+        - visual.transformer.resblocks.[last train_visual_last_n]
+        - transformer.resblocks.[last train_text_last_n]
+        - ln/proj heads that are usually safe to tune
+        """
+
+        # 1. 先全部冻结
+        for _, param in self.clip.named_parameters():
+            param.requires_grad = False
+
+        # 2. 这些参数始终训练
+        always_train_prefixes = [
+            "ln_final.",
+            "text_projection",
+            "logit_scale",
+            "visual.ln_post.",
+            "visual.proj",
+        ]
+
         for name, param in self.clip.named_parameters():
-            # print(name)
-            if name.find("ln_final.") == 0 or name.find("text_projection") == 0 or name.find("logit_scale") == 0 \
-                                        or name.find("visual.ln_post.") == 0 or name.find("visual.proj") == 0:
-                # print("1")
-                continue
-            elif name.find("visual.transformer.resblocks.") == 0 or name.find("transformer.resblocks.") == 0:
-                layer_num = int(name.split(".resblocks.")[1].split(".")[0])
-                if layer_num >= 12:
-                    # print("2")
-                    continue
-            if name.find("conv2.") == 0:
-                # print("3")
-                continue
-            else:
-                # paramenters which < freeze_layer_num will be freezed
-                param.requires_grad = False
+            if any(name.startswith(prefix) for prefix in always_train_prefixes):
+                param.requires_grad = True
+
+        # 3. 统计 visual / text transformer block 总数
+        visual_blocks = set()
+        text_blocks = set()
+
+        for name, _ in self.clip.named_parameters():
+            if name.startswith("visual.transformer.resblocks."):
+                idx = int(name.split("visual.transformer.resblocks.")[1].split(".")[0])
+                visual_blocks.add(idx)
+            elif name.startswith("transformer.resblocks."):
+                idx = int(name.split("transformer.resblocks.")[1].split(".")[0])
+                text_blocks.add(idx)
+
+        num_visual_blocks = max(visual_blocks) + 1 if len(visual_blocks) > 0 else 0
+        num_text_blocks = max(text_blocks) + 1 if len(text_blocks) > 0 else 0
+
+        # 4. 只放开最后 N 层
+        visual_start = max(0, num_visual_blocks - train_visual_last_n)
+        text_start = max(0, num_text_blocks - train_text_last_n)
+
+        for name, param in self.clip.named_parameters():
+            if name.startswith("visual.transformer.resblocks."):
+                idx = int(name.split("visual.transformer.resblocks.")[1].split(".")[0])
+                if idx >= visual_start:
+                    param.requires_grad = True
+
+            elif name.startswith("transformer.resblocks."):
+                idx = int(name.split("transformer.resblocks.")[1].split(".")[0])
+                if idx >= text_start:
+                    param.requires_grad = True
+
+
+    def print_trainable_params(self):
+        print("===== Trainable Parameters =====")
+        total = 0
+        trainable = 0
+        for name, param in self.named_parameters():
+            n = param.numel()
+            total += n
+            if param.requires_grad:
+                trainable += n
+                print(name)
+        print(f"trainable params: {trainable:,} / {total:,} ({100.0 * trainable / total:.2f}%)")
 
     def load_clip(self, clipPath: str) -> tuple:
         try:
@@ -487,6 +543,9 @@ class DCMHT(nn.Module):
         image_global = image_global / (image_global.norm(dim=-1, keepdim=True) + 1e-6)
         fused_text_global = fused_text_global / (fused_text_global.norm(dim=-1, keepdim=True) + 1e-6)
 
+    
+
+
         
         gI1, gT1 = self.gcr(image_global, fused_text_global)
         gI2, gT2, S = self.agp(gI1, gT1)
@@ -504,6 +563,15 @@ class DCMHT(nn.Module):
         image_hash,text_hash, extra = self.encoding(image,text,raw_text,label,return_extra=True)
         align_loss = banzhaf_weighted_infonce(extra["gI"], extra["gT"], extra["w"], tau=0.2)
         return image_hash, text_hash,align_loss
+
+
+
+
+
+
+
+
+
 
 
 
