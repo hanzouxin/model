@@ -394,9 +394,6 @@ class DCMHT(nn.Module):
         self.freeze_clip_backbone(train_visual_last_n=3, train_text_last_n=2)
         self.print_trainable_params()
 
-        self.image_implicit_prompt = nn.Parameter(torch.randn(1, embedDim) * 0.02)
-        self.text_implicit_prompt = nn.Parameter(torch.randn(1, embedDim) * 0.02)
-
 
     def freeze_clip_backbone(self, train_visual_last_n=3, train_text_last_n=2):
         """
