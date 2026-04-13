@@ -44,13 +44,19 @@ class Trainer(TrainBase):
         
         self.model.float()
         self.optimizer = BertAdam([
-                    {'params': self.model.clip.parameters(), 'lr': self.args.clip_lr},
+            {'params': [p for p in self.model.clip.parameters() if p.requires_grad], 'lr': self.args.clip_lr},
 
-                    {'params': self.model.image_hash.parameters(), 'lr': self.args.lr},
-                    {'params': self.model.text_hash.parameters(), 'lr': self.args.lr}
-                    ], lr=self.args.lr, warmup=self.args.warmup_proportion, schedule='warmup_cosine',
-                    b1=0.9, b2=0.98, e=1e-6, t_total=len(self.train_loader) * self.args.epochs,
-                    weight_decay=self.args.weight_decay, max_grad_norm=1.0)
+            {'params': [p for p in self.model.image_adapter.parameters() if p.requires_grad], 'lr': self.args.lr},
+            {'params': [p for p in self.model.text_prompt_fusion.parameters() if p.requires_grad], 'lr': self.args.lr},
+            {'params': [p for p in self.model.gcr.parameters() if p.requires_grad], 'lr': self.args.lr},
+            {'params': [p for p in self.model.agp.parameters() if p.requires_grad], 'lr': self.args.lr},
+            {'params': [p for p in self.model.bz_guidance.parameters() if p.requires_grad], 'lr': self.args.lr},
+
+            {'params': [p for p in self.model.image_hash.parameters() if p.requires_grad], 'lr': self.args.lr},
+            {'params': [p for p in self.model.text_hash.parameters() if p.requires_grad], 'lr': self.args.lr}
+            ], lr=self.args.lr, warmup=self.args.warmup_proportion, schedule='warmup_cosine',
+            b1=0.9, b2=0.98, e=1e-6, t_total=len(self.train_loader) * self.args.epochs,
+            weight_decay=self.args.weight_decay, max_grad_norm=1.0)
 
         self.total_time = 0
         print(self.model)
